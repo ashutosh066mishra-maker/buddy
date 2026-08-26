@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from dotenv import load_dotenv
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers  import JsonOutputParser
 from google import genai
 from google.genai import types
 
@@ -27,7 +27,10 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import yfinance as yf
 import requests
-from ddgs import DDGS
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    from ddgs import DDGS
 import wikipedia
 import datetime
 from googlesearch import search as google_search
@@ -52,6 +55,19 @@ if not GEMINI_API_KEY:
 
 genai_client = genai.Client(api_key=GEMINI_API_KEY)
 uploaded_10k_file = None
+
+DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+FALLBACK_MODELS = [DEFAULT_MODEL, "gemini-3.5-flash", "gemini-flash-latest"]
+
+def create_chat_session(config, history=None):
+    last_err = None
+    for model_name in FALLBACK_MODELS:
+        try:
+            return genai_client.chats.create(model=model_name, config=config, history=history or [])
+        except Exception as e:
+            last_err = e
+            print(f"Failed to create chat session with {model_name}: {e}")
+    raise RuntimeError(f"Could not create chat session with any Gemini model: {last_err}")
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -407,87 +423,42 @@ def stream_gemini_response(chat, final_prompt, chart_data=None):
         if chart_data:
             yield json.dumps({"type": "charts", "data": chart_data}) + "\n"
         
+        status_msgs = {
+            "get_stock_price": "Fetching real-time stock data...",
+            "get_company_info": "Fetching company info...",
+            "get_exchange_rate": "Checking live exchange rates...",
+            "get_historical_exchange_rate": "Fetching historical exchange rates...",
+            "search_web": "Searching the web...",
+            "search_wikipedia": "Searching Wikipedia...",
+            "get_current_news": "Fetching latest news...",
+            "google_search_realtime": "Searching Google...",
+            "scrape_website": "Reading website contents...",
+            "crawl_website_links": "Analyzing website links...",
+            "search_arxiv": "Searching academic papers...",
+            "get_macroeconomic_data": "Fetching macro data from World Bank...",
+            "get_treasury_yields": "Fetching Treasury yields...",
+            "fact_check_claim": "Cross-referencing claims..."
+        }
+        
         try:
             response = chat.send_message_stream(final_prompt)
-        except Exception as e:
-            yield json.dumps({"type": "text", "chunk": f"\n\n**Error:** {str(e)}"}) + "\n"
-            return
-
-        def process_response(resp):
-            for chunk in resp:
+            for chunk in response:
                 try:
-                    part = chunk.parts[0] if getattr(chunk, 'parts', None) and len(chunk.parts) > 0 else None
-                    fc = getattr(part, 'function_call', None) if part else None
-                    
-                    if fc and fc.name:
-                        func_name = fc.name
-                        args = {k: v for k, v in fc.args.items()}
-                        
-                        status_msgs = {
-                            "get_stock_price": "Fetching real-time stock data...",
-                            "get_company_info": "Fetching company info...",
-                            "get_exchange_rate": "Checking live exchange rates...",
-                            "get_historical_exchange_rate": "Fetching historical exchange rates...",
-                            "search_web": "Searching the web...",
-                            "search_wikipedia": "Searching Wikipedia...",
-                            "get_current_news": "Fetching latest news...",
-                            "google_search_realtime": "Searching Google...",
-                            "scrape_website": "Reading website contents...",
-                            "crawl_website_links": "Analyzing website links...",
-                            "search_arxiv": "Searching academic papers...",
-                            "get_macroeconomic_data": "Fetching macro data from World Bank...",
-                            "get_treasury_yields": "Fetching Treasury yields...",
-                            "fact_check_claim": "Cross-referencing claims..."
-                        }
-                        status_msg = status_msgs.get(func_name, f"Executing {func_name}...")
-                        yield json.dumps({"type": "status", "message": status_msg}) + "\n"
-                        
-                        if func_name == "get_stock_price":
-                            result = get_stock_price(**args)
-                        elif func_name == "get_company_info":
-                            result = get_company_info(**args)
-                        elif func_name == "get_exchange_rate":
-                            result = get_exchange_rate(**args)
-                        elif func_name == "get_historical_exchange_rate":
-                            result = get_historical_exchange_rate(**args)
-                        elif func_name == "search_web":
-                            result = search_web(**args)
-                        elif func_name == "search_wikipedia":
-                            result = search_wikipedia(**args)
-                        elif func_name == "get_current_news":
-                            result = get_current_news(**args)
-                        elif func_name == "google_search_realtime":
-                            result = google_search_realtime(**args)
-                        elif func_name == "scrape_website":
-                            result = scrape_website(**args)
-                        elif func_name == "crawl_website_links":
-                            result = crawl_website_links(**args)
-                        elif func_name == "search_arxiv":
-                            result = search_arxiv(**args)
-                        elif func_name == "get_macroeconomic_data":
-                            result = get_macroeconomic_data(**args)
-                        elif func_name == "get_treasury_yields":
-                            result = get_treasury_yields(**args)
-                        elif func_name == "fact_check_claim":
-                            result = fact_check_claim(**args)
-                        else:
-                            result = "Unknown function"
-                        
-                        new_resp = chat.send_message_stream(
-                            types.Part.from_function_response(
-                                name=func_name,
-                                response={"result": result}
-                            )
-                        )
-                        yield from process_response(new_resp)
-                    else:
-                        if chunk.text:
-                            yield json.dumps({"type": "text", "chunk": chunk.text}) + "\n"
-                except Exception as e:
-                    print(f"Stream processing error: {e}")
-                    yield json.dumps({"type": "text", "chunk": f"\n\n**Error:** {str(e)}"}) + "\n"
-
-        yield from process_response(response)
+                    if getattr(chunk, 'parts', None):
+                        for part in chunk.parts:
+                            fc = getattr(part, 'function_call', None)
+                            if fc and fc.name:
+                                status_msg = status_msgs.get(fc.name, f"Executing {fc.name}...")
+                                yield json.dumps({"type": "status", "message": status_msg}) + "\n"
+                            elif getattr(part, 'text', None):
+                                yield json.dumps({"type": "text", "chunk": part.text}) + "\n"
+                    elif getattr(chunk, 'text', None):
+                        yield json.dumps({"type": "text", "chunk": chunk.text}) + "\n"
+                except Exception as err:
+                    print(f"Chunk processing error: {err}")
+        except Exception as e:
+            print(f"Chat stream error: {e}")
+            yield json.dumps({"type": "text", "chunk": f"\n\n**Error:** {str(e)}"}) + "\n"
                 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
@@ -590,7 +561,7 @@ def analyze_expenses(file: UploadFile = File(None), user_prompt: str = Form(None
             raise HTTPException(status_code=400, detail="Please provide a query or attach a supported file.")
             
     try:
-        chat = genai_client.chats.create(model='gemini-2.5-flash', config=config, history=history)
+        chat = create_chat_session(config=config, history=history)
         return stream_gemini_response(chat, final_prompt, chart_data)
         
         
@@ -623,32 +594,37 @@ def upload_10k(file: UploadFile = File(...)):
 def query_10k(user_prompt: str = Form(...), chat_history: str = Form(None)):
     global uploaded_10k_file
     try:
-        if not uploaded_10k_file:
-            def event_generator():
-                yield json.dumps({"type": "text", "chunk": "Error: No documents have been ingested yet. Please upload a 10-K document first."}) + "\n"
-            return StreamingResponse(event_generator(), media_type="application/x-ndjson")
-            
         current_time = datetime.datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
-        system_context = (
-            "You are Market Analyst Pro, a professional Financial Market Analyst powered by Gemini 2.5 Flash. The current date and time is {current_time}. "
-            "You have access to extensive research tools including arXiv, World Bank macro data, Treasury yields, and Fact-Checking tools.\n"
-            "IMPORTANT: Provide the best possible answer immediately using your tools in one go. "
-            "CRITICAL: Give detailed, accurate, but SHORT and CONCISE answers only. Do not provide extended explanations unless the user explicitly asks for them. "
-            "Answer the user's question based strictly and ONLY on the provided SEC 10-K document. "
-            "Do not use outside knowledge unless using your tools to fetch current market data. "
-            "When you provide an answer based on the document, explicitly cite the document name and page numbers where the information was found.\n\n"
-            "BEHAVIORAL INSTRUCTIONS (ONE-SHOT EXECUTION):\n"
-            "1. You are explicitly forbidden from asking the user follow-up or clarifying questions. Be conclusive.\n"
-            "2. If the answer is in the document, state it immediately. If it is not, you MUST declare 'Information not available in the document' without speculating.\n\n"
-            "SMART SUGGESTION ENGINE:\n"
-            "You must ALWAYS append a tailored 'Suggested Next Questions' section at the very bottom of your response.\n"
-            "Look at the specific document context you just retrieved and dynamically generate 3 high-value, highly relevant follow-up questions that the user might want to ask next based on this specific information.\n"
-            "Format this section cleanly using Markdown line breaks and bullet points.\n\n"
-            "DATA VISUALIZATION:\n"
-            "If the response contains quantifiable financial data, comparisons, trends, or metrics, you MUST automatically output a clean JSON schema alongside your text response to visualize this data as a chart, EVEN IF the user does not explicitly ask for a chart.\n"
-            f"Output formatting instructions:\n{chart_parser.get_format_instructions()}\n"
-            "You must output the JSON payload strictly in a markdown block e.g. ```json <json_payload> ```. Always describe the chart in your text."
-        )
+        if uploaded_10k_file:
+            system_context = (
+                f"You are Market Analyst Pro, a professional Senior Financial & Equity Analyst. The current date and time is {current_time}. "
+                "You have access to extensive research tools including live market data, arXiv, World Bank macro data, Treasury yields, and Fact-Checking tools.\n"
+                "IMPORTANT: Provide the best possible answer immediately using your tools in one go. "
+                "CRITICAL: Give detailed, accurate, but SHORT and CONCISE answers only. "
+                "Answer the user's question based on the provided SEC 10-K document and current market tools. "
+                "When referencing the document, cite document sections or page numbers where applicable.\n\n"
+                "SMART SUGGESTION ENGINE:\n"
+                "You must ALWAYS append a tailored 'Suggested Next Questions' section at the very bottom of your response with 3 bullet points.\n\n"
+                "DATA VISUALIZATION:\n"
+                "If the response contains quantifiable financial data, comparisons, trends, or metrics, you MUST automatically output a clean JSON schema alongside your text response to visualize this data as a chart.\n"
+                f"Output formatting instructions:\n{chart_parser.get_format_instructions()}\n"
+                "You must output the JSON payload strictly in a markdown block e.g. ```json <json_payload> ```. Always describe the chart in your text."
+            )
+            final_prompt = ["Here is the user's SEC 10-K document. Please answer based strictly on the document context and use your tools if needed.", uploaded_10k_file, user_prompt]
+        else:
+            system_context = (
+                f"You are Market Analyst Pro, a professional Senior Financial & Equity Research Analyst. The current date and time is {current_time}. "
+                "You have access to extensive research tools including live stock data, company financials, exchange rates, arXiv academic research, World Bank macro data, Treasury yields, and Fact-Checking tools.\n"
+                "IMPORTANT: Provide the best possible answer immediately using your tools in one go. "
+                "CRITICAL: Give detailed, accurate, institutional-grade market, financial, and equity analysis.\n\n"
+                "SMART SUGGESTION ENGINE:\n"
+                "You must ALWAYS append a tailored 'Suggested Next Questions' section at the very bottom of your response with 3 bullet points.\n\n"
+                "DATA VISUALIZATION:\n"
+                "If the response contains quantifiable financial data, comparisons, trends, or metrics, you MUST automatically output a clean JSON schema alongside your text response to visualize this data as a chart.\n"
+                f"Output formatting instructions:\n{chart_parser.get_format_instructions()}\n"
+                "You must output the JSON payload strictly in a markdown block e.g. ```json <json_payload> ```. Always describe the chart in your text."
+            )
+            final_prompt = f"You are Market Analyst Pro. Please analyze this market/financial query thoroughly and use your tools as needed: {user_prompt}"
 
         config = types.GenerateContentConfig(
             tools=[
@@ -673,9 +649,7 @@ def query_10k(user_prompt: str = Form(...), chat_history: str = Form(None)):
             except Exception as e:
                 print(f"Failed to parse chat history: {e}")
 
-        final_prompt = ["Here is the user's SEC 10-K document. Please answer based strictly on the document context and use your tools if needed.", uploaded_10k_file, user_prompt]
-
-        chat = genai_client.chats.create(model='gemini-2.5-flash', config=config, history=history)
+        chat = create_chat_session(config=config, history=history)
         return stream_gemini_response(chat, final_prompt)
         
     except Exception as e:

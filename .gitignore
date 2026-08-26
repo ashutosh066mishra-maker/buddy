@@ -1,8 +1,9 @@
 # Environments
 .env
 .venv
-env/
 venv/
+venv_local/
+env/
 ENV/
 env.bak/
 venv.bak/
@@ -16,5 +17,8 @@ __pycache__/
 .vscode/
 .idea/
 
-# Vector DB
+# Vector DB & cache
 chroma_db/
+chroma_db_gemini/
+.langchain.db*
+import_test_log.txt
